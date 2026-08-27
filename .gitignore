@@ -1,0 +1,21 @@
+# Datasets are never committed.
+# The phishing feed contains live malicious URLs -- committing it will get
+# the repo flagged by GitHub malware scanning and by corporate proxies.
+data/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Trained model files (regenerate them, don't version them)
+*.pkl
+*.pt
+models/
+
+# Editor / OS noise
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
