@@ -80,6 +80,35 @@ def main() -> None:
     print(classification_report(y_test, predictions, target_names=["benign", "phishing"]))
 
     # ---------------------------------------------------------------------
+    # Threshold sweep
+    # ---------------------------------------------------------------------
+    # predict() hides a decision: it takes the model's probability and cuts
+    # it at 0.5. That 0.5 is a default, not a law. Here we take the raw
+    # probabilities and try other cut-offs to see the trade-off directly.
+    #
+    # predict_proba returns two columns (P(benign), P(phishing)).
+    # [:, 1] takes the second one -- the probability of phishing.
+    probabilities = model.predict_proba(X_test)[:, 1]
+
+    print("\nThreshold sweep (how the cut-off changes the trade-off):")
+    print("  thresh   flagged   false alarms   missed attacks   precision   recall")
+    for threshold in [0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]:
+        flagged = probabilities >= threshold
+
+        true_pos = int(((flagged == 1) & (y_test == 1)).sum())
+        false_pos = int(((flagged == 1) & (y_test == 0)).sum())
+        false_neg = int(((flagged == 0) & (y_test == 1)).sum())
+
+        # Guard against dividing by zero when nothing is flagged at all.
+        precision = true_pos / (true_pos + false_pos) if (true_pos + false_pos) else 0.0
+        recall = true_pos / (true_pos + false_neg) if (true_pos + false_neg) else 0.0
+
+        print(
+            f"    {threshold:.1f}    {flagged.sum():>5}      {false_pos:>8}       "
+            f"{false_neg:>8}         {precision:.2f}      {recall:.2f}"
+        )
+
+    # ---------------------------------------------------------------------
     # What did it actually learn?
     # ---------------------------------------------------------------------
     # Logistic regression assigns a weight to each feature. Positive weight

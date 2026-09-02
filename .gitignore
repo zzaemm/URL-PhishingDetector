@@ -9,6 +9,9 @@ __pycache__/
 .venv/
 venv/
 
+# Scheduled-job output
+logs/
+
 # Trained model files (regenerate them, don't version them)
 *.pkl
 *.pt

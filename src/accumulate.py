@@ -22,12 +22,34 @@ Run from the project root:
 """
 
 import io
+import sys
 import zipfile
 from datetime import date, datetime
 from pathlib import Path
 
 import pandas as pd
 import requests
+
+
+class Tee:
+    """Write to the console AND a log file at the same time.
+
+    When this script runs from Task Scheduler there is no console to read,
+    so everything it prints must also land in a file. Assigning an instance
+    of this to sys.stdout makes every print() go to both places.
+    """
+
+    def __init__(self, *streams):
+        self.streams = streams
+
+    def write(self, text):
+        for stream in self.streams:
+            stream.write(text)
+            stream.flush()  # flush immediately so a crash still leaves a log
+
+    def flush(self):
+        for stream in self.streams:
+            stream.flush()
 
 PHISH_FEED_URL = "https://openphish.com/feed.txt"
 TRANCO_URL = "https://tranco-list.eu/top-1m.csv.zip"
@@ -130,4 +152,17 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    # Everything printed from here on goes to the console and to
+    # logs/accumulate.log, so scheduled runs leave a trace.
+    LOG_DIR = Path(__file__).parent.parent / "logs"
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+    with open(LOG_DIR / "accumulate.log", "a", encoding="utf-8") as log_file:
+        sys.stdout = Tee(sys.__stdout__, log_file)
+        print(f"\n===== run started {datetime.now():%Y-%m-%d %H:%M:%S} =====")
+        try:
+            main()
+        except Exception as error:
+            # Without this, a scheduled run that crashes leaves no explanation.
+            print(f"FAILED: {type(error).__name__}: {error}")
+            raise
