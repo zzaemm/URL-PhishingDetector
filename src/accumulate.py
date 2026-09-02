@@ -44,12 +44,17 @@ class Tee:
 
     def write(self, text):
         for stream in self.streams:
-            stream.write(text)
-            stream.flush()  # flush immediately so a crash still leaves a log
+            if not stream.closed:
+                stream.write(text)
+                stream.flush()  # flush immediately so a crash still leaves a log
 
     def flush(self):
+        # Python flushes sys.stdout again during interpreter shutdown, which
+        # can happen after our log file has already been closed. Skip closed
+        # streams rather than raising ValueError on the way out.
         for stream in self.streams:
-            stream.flush()
+            if not stream.closed:
+                stream.flush()
 
 PHISH_FEED_URL = "https://openphish.com/feed.txt"
 TRANCO_URL = "https://tranco-list.eu/top-1m.csv.zip"
@@ -158,6 +163,7 @@ if __name__ == "__main__":
     LOG_DIR.mkdir(parents=True, exist_ok=True)
 
     with open(LOG_DIR / "accumulate.log", "a", encoding="utf-8") as log_file:
+        original_stdout = sys.stdout
         sys.stdout = Tee(sys.__stdout__, log_file)
         print(f"\n===== run started {datetime.now():%Y-%m-%d %H:%M:%S} =====")
         try:
@@ -166,3 +172,7 @@ if __name__ == "__main__":
             # Without this, a scheduled run that crashes leaves no explanation.
             print(f"FAILED: {type(error).__name__}: {error}")
             raise
+        finally:
+            # Put stdout back BEFORE the file closes, so nothing later in
+            # shutdown tries to write through a Tee holding a dead handle.
+            sys.stdout = original_stdout
