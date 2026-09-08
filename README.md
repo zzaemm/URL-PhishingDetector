@@ -17,10 +17,10 @@ validation under an explicit cost policy, test set evaluated once.
 | Model | AUC | Precision | Recall | False alarms | Missed attacks |
 |---|---|---|---|---|---|
 | Logistic regression (25 features) | 0.893 | 0.682 | 0.927 | 494 | 84 |
-| **Gradient boosting** | **0.949** | **0.834** | **0.916** | **208** | **96** |
+| **Gradient boosting** | **0.949** | **0.844** | **0.903** | **191** | **111** |
 
 Held-out test set: 2,286 URLs, 1,143 phishing / 1,143 benign. Thresholds (0.24
-and 0.29) were chosen on a separate validation split; the test set was evaluated
+and 0.31) were chosen on a separate validation split; the test set was evaluated
 exactly once.
 
 These numbers are reported at `FALSE_ALARM_COST = 0.5` — a deliberate policy
@@ -39,8 +39,8 @@ would score on this balanced test set — the floor any real model must beat.
 **Caveat stated up front:** the test set is balanced 50/50. Real traffic is not —
 benign URLs outnumber phishing by orders of magnitude. Under that imbalance
 recall would hold but precision would fall sharply, because false alarms scale
-with the volume of benign traffic while true catches do not. At the 18% false
-alarm rate reported above, traffic at 10,000:1 would produce roughly 1,800 false
+with the volume of benign traffic while true catches do not. At the 17% false
+alarm rate reported above, traffic at 10,000:1 would produce roughly 1,700 false
 alarms for every phishing URL encountered.
 
 **So this is a first-stage filter, not a standalone blocker.** It is good at
@@ -112,24 +112,24 @@ Same model, same test set, read at five different policy settings:
 
 | Cost | Threshold | Precision | Recall | False alarms | Missed attacks |
 |---|---|---|---|---|---|
-| 0.10 | 0.05 | 0.635 | 0.990 | 649 | 12 |
-| 0.25 | 0.17 | 0.767 | 0.951 | 331 | 56 |
-| **0.50** | **0.29** | **0.834** | **0.916** | **208** | **96** |
-| 1.00 | 0.41 | 0.872 | 0.873 | 146 | 145 |
-| 2.00 | 0.67 | 0.938 | 0.778 | 59 | 254 |
+| 0.10 | 0.05 | 0.638 | 0.990 | 643 | 12 |
+| 0.25 | 0.15 | 0.753 | 0.958 | 359 | 48 |
+| **0.50** | **0.31** | **0.844** | **0.903** | **191** | **111** |
+| 1.00 | 0.40 | 0.872 | 0.874 | 147 | 144 |
+| 2.00 | 0.72 | 0.941 | 0.763 | 55 | 271 |
 
 Read it marginally — what does each step down cost per extra attack caught?
 
-- 1.0 → 0.5 saves 49 attacks, costs 62 false alarms. **~1.3 per attack.**
-- 0.5 → 0.25 saves 40 attacks, costs 123 false alarms. **~3 per attack.**
-- 0.25 → 0.10 saves 44 attacks, costs 318 false alarms. **~7 per attack.**
+- 1.0 → 0.5 saves 33 attacks, costs 44 false alarms. **~1.3 per attack.**
+- 0.5 → 0.25 saves 63 attacks, costs 168 false alarms. **~2.7 per attack.**
+- 0.25 → 0.10 saves 36 attacks, costs 284 false alarms. **~7.9 per attack.**
 
-The price roughly quintuples across that range while the benefit shrinks, so
-the knee sits between 0.5 and 0.25. This project reports **0.5**.
+The price sextuples across that range while the benefit shrinks, so the knee
+sits between 0.5 and 0.25. This project reports **0.5**.
 
 The intuition that a security tool should simply refuse to miss anything is
 worth pricing before acting on it. Cost 0.10 nearly delivers it — 12 missed
-attacks out of 1,143 — but blocks **57% of safe sites**. A detector that noisy
+attacks out of 1,143 — but blocks **56% of safe sites**. A detector that noisy
 gets switched off, and a switched-off detector has a real-world recall of zero.
 Alert fatigue is a security failure, not a UX complaint.
 
@@ -229,11 +229,12 @@ reporting accuracy for a security classifier.
 **5. The gap between the two models depends on the policy you evaluate under.**
 At `FALSE_ALARM_COST = 1.0` gradient boosting beats logistic regression on
 precision by about 4 points (0.872 vs 0.835). At 0.5, where both models are
-pushed toward high recall, the gap widens to 15 points (0.834 vs 0.682) — to
-reach comparable recall, logistic regression needs 494 false alarms where
-gradient boosting needs 208, more than twice as many. The linear model degrades
-much faster when asked to catch nearly everything. A single comparison at one
-threshold would have understated the difference by a factor of three.
+pushed toward high recall, the gap widens to 16 points (0.844 vs 0.682). The
+concrete version: logistic regression buys marginally more recall (0.927 vs
+0.903) and pays 494 false alarms for it, against gradient boosting's 191 — 2.6×
+as many safe sites blocked for 27 fewer missed attacks. The linear model
+degrades much faster when asked to catch nearly everything, and a single
+comparison at one threshold would have understated the difference fourfold.
 
 ---
 
