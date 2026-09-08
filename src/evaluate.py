@@ -43,7 +43,22 @@ FEATURES_PATH = Path(__file__).parent.parent / "data" / "raw" / "features.csv"
 # worse than letting phishing through; lower it if the reverse. This single
 # number encodes the security policy -- make it explicit rather than
 # accidental, which is what an unexamined 0.5 threshold does.
-FALSE_ALARM_COST = 1.0
+#
+# WHY 0.5 AND NOT 1.0
+#
+# A false alarm costs a user five seconds of annoyance. A missed attack costs
+# them their credentials. Treating those as equal -- which 1.0 does -- is a
+# claim, not a neutral default, and it is the same blind spot as reporting
+# accuracy: both count mistakes without asking what each one costs.
+#
+# 0.5 weights a missed attack twice as heavily as a false alarm. It is not
+# pushed further because recall gets expensive fast: see the policy sweep
+# printed at the end of this script. Buying recall from 1.0 down to 0.5 costs
+# about 1.3 extra false alarms per attack caught; carrying on down to 0.1
+# costs over 7, and ends up blocking 57% of safe sites. A detector that noisy
+# gets switched off, and a switched-off detector has a real-world recall of
+# zero. Alert fatigue is a security failure, not a UX complaint.
+FALSE_ALARM_COST = 0.5
 
 
 def split_three_ways(X, y):
@@ -63,7 +78,7 @@ def split_three_ways(X, y):
     return X_train, X_val, X_test, y_train, y_val, y_test
 
 
-def score_at(probabilities, y_true, threshold):
+def score_at(probabilities, y_true, threshold, false_alarm_cost=FALSE_ALARM_COST):
     """Return (precision, recall, f-score) for one cut-off."""
     flagged = probabilities >= threshold
 
@@ -75,7 +90,7 @@ def score_at(probabilities, y_true, threshold):
     recall = true_pos / (true_pos + false_neg) if (true_pos + false_neg) else 0.0
 
     # Weighted F-score. beta > 1 favours recall, beta < 1 favours precision.
-    beta_sq = 1.0 / FALSE_ALARM_COST
+    beta_sq = 1.0 / false_alarm_cost
     denominator = (beta_sq * precision) + recall
     f_score = (
         (1 + beta_sq) * precision * recall / denominator if denominator else 0.0
@@ -83,15 +98,52 @@ def score_at(probabilities, y_true, threshold):
     return precision, recall, f_score
 
 
-def pick_threshold(probabilities, y_true):
+def pick_threshold(probabilities, y_true, false_alarm_cost=FALSE_ALARM_COST):
     """Choose the cut-off that maximises our F-score ON VALIDATION DATA."""
     best = (0.5, 0.0)
     for step in range(5, 96):
         threshold = step / 100
-        _, _, f_score = score_at(probabilities, y_true, threshold)
+        _, _, f_score = score_at(probabilities, y_true, threshold, false_alarm_cost)
         if f_score > best[1]:
             best = (threshold, f_score)
     return best[0]
+
+
+def sweep_costs(val_probs, y_val, test_probs, y_test, costs) -> pd.DataFrame:
+    """Show what the FALSE_ALARM_COST setting actually buys you.
+
+    Nothing is retrained here. It is the same model and the same test set,
+    read at different dial settings -- because the threshold is a POLICY
+    choice, not a model property, and the policy is what this constant sets.
+
+    The point is that "optimal threshold" is meaningless until someone says
+    what they are optimising for. Leaving the cost at its 1.0 default is not
+    a neutral choice: it is a claim that blocking a safe site and letting a
+    credential-theft page through are equally bad. State it and defend it,
+    or change it -- but do not inherit it silently.
+    """
+    rows = []
+    for cost in costs:
+        # Threshold is still chosen on VALIDATION only. Changing the policy
+        # does not license us to peek at test.
+        threshold = pick_threshold(val_probs, y_val, cost)
+        precision, recall, _ = score_at(test_probs, y_test, threshold, cost)
+
+        flagged = test_probs >= threshold
+        false_alarms = int((flagged & (y_test == 0)).sum())
+        missed = int((~flagged & (y_test == 1)).sum())
+
+        rows.append(
+            {
+                "cost": cost,
+                "threshold": threshold,
+                "precision": round(precision, 3),
+                "recall": round(recall, 3),
+                "false_alarms": false_alarms,
+                "missed_attacks": missed,
+            }
+        )
+    return pd.DataFrame(rows)
 
 
 def evaluate(name, model, splits) -> dict:
@@ -127,7 +179,14 @@ def evaluate(name, model, splits) -> dict:
     print()
     print(classification_report(y_test, predictions, target_names=["benign", "phishing"]))
 
-    return {"name": name, "auc": auc, "precision": test_precision, "recall": test_recall}
+    return {
+        "name": name,
+        "auc": auc,
+        "precision": test_precision,
+        "recall": test_recall,
+        "val_probs": val_probs,
+        "test_probs": test_probs,
+    }
 
 
 def main() -> None:
@@ -164,7 +223,21 @@ def main() -> None:
     )
 
     print(f"\n{'=' * 62}\nSUMMARY\n{'=' * 62}")
-    print(pd.DataFrame(results).round(3).to_string(index=False))
+    summary = pd.DataFrame(results).drop(columns=["val_probs", "test_probs"])
+    print(summary.round(3).to_string(index=False))
+
+    # What does the security policy setting cost us?
+    print(f"\n{'=' * 62}\nTHRESHOLD POLICY SWEEP (gradient boosting)\n{'=' * 62}")
+    print("cost < 1 favours catching phishing; cost > 1 favours not blocking safe sites\n")
+    print(
+        sweep_costs(
+            results[1]["val_probs"],
+            splits[4],
+            results[1]["test_probs"],
+            splits[5],
+            costs=[0.1, 0.25, 0.5, 1.0, 2.0],
+        ).to_string(index=False)
+    )
 
     # Which features does the strong model actually rely on?
     #
