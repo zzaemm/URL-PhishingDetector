@@ -23,6 +23,7 @@ Run from the project root:
 
 import io
 import sys
+import time
 import zipfile
 from datetime import date, datetime
 from pathlib import Path
@@ -74,12 +75,58 @@ PHISH_POOL = RAW / "phish_pool.csv"      # grows over time
 TRANCO_CACHE = RAW / "tranco_cache.csv"  # refreshed monthly
 DATASET = RAW / "dataset.csv"            # rebuilt every run
 
+# Retry policy for the scheduled run.
+#
+# This script's real failure mode is not flaky internet -- it is starting
+# BEFORE the network exists. The task is registered with -StartWhenAvailable,
+# so if the machine is asleep at 21:00 it runs on wake instead. Windows
+# resumes, the script launches, and the wifi adapter is still associating.
+# The first request fails with a DNS error or a connect timeout, and the old
+# code gave up right there. Two of the last four scheduled runs died this way.
+#
+# So the waits are deliberately longer than reference_data.py's (2/4/8s,
+# tuned for a transient blip). Here we need to outlast a network coming up
+# from cold, which takes tens of seconds.
+FETCH_ATTEMPTS = 6
+FETCH_FIRST_WAIT = 5  # then 10, 20, 40, 80 -- about 2.5 minutes of patience
+
+
+def get_with_retry(url: str, timeout: int, attempts: int = FETCH_ATTEMPTS):
+    """GET a URL, retrying only on failures that might fix themselves.
+
+    The distinction matters. A connection error or a timeout means we could
+    not reach the server -- waiting and trying again is reasonable, because
+    the network may be about to appear. An HTTP error status means we DID
+    reach the server and it said no: 404 means the file moved, 403 means we
+    are blocked. Those will not resolve on their own, and retrying a 403 is
+    indistinguishable from hammering a host that has already refused you.
+    Fail fast on those and let the log say why.
+    """
+    for attempt in range(1, attempts + 1):
+        try:
+            response = requests.get(url, timeout=timeout)
+        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as error:
+            # Could not reach the host. Possibly the network is still waking.
+            print(f"  attempt {attempt}/{attempts} could not connect: {type(error).__name__}")
+            if attempt == attempts:
+                print("  giving up -- host unreachable for the whole retry window")
+                raise
+            wait = FETCH_FIRST_WAIT * (2 ** (attempt - 1))
+            print(f"  waiting {wait}s for the network")
+            time.sleep(wait)
+            continue
+
+        # We reached the server. Whatever it said is final.
+        response.raise_for_status()
+        if attempt > 1:
+            print(f"  succeeded on attempt {attempt}")
+        return response
+
 
 def update_phish_pool() -> pd.DataFrame:
     """Fetch today's feed and merge any new URLs into the running pool."""
     print(f"[{datetime.now():%Y-%m-%d %H:%M}] Fetching {PHISH_FEED_URL}")
-    response = requests.get(PHISH_FEED_URL, timeout=30)
-    response.raise_for_status()
+    response = get_with_retry(PHISH_FEED_URL, timeout=30)
 
     todays_urls = [line.strip() for line in response.text.splitlines() if line.strip()]
     today = pd.DataFrame({"url": todays_urls, "first_seen": date.today().isoformat()})
@@ -110,8 +157,7 @@ def load_benign_domains() -> list[str]:
             return cached["domain"].tolist()
 
     print(f"  refreshing benign list from {TRANCO_URL} (large download)")
-    response = requests.get(TRANCO_URL, timeout=180)
-    response.raise_for_status()
+    response = get_with_retry(TRANCO_URL, timeout=180)
 
     archive = zipfile.ZipFile(io.BytesIO(response.content))
     with archive.open(archive.namelist()[0]) as csv_file:
