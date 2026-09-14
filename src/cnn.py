@@ -286,10 +286,23 @@ def main() -> None:
     print("boosting scored AUC 0.949 and this CNN 0.979; both are inflated by")
     print("domain overlap, so compare like with like.")
 
-    # Saved so week 5 can compare all three models without retraining.
+    # Saved so plot_curves.py and week 5 can use this model's predictions
+    # without retraining it. The threshold goes in too -- without it the
+    # operating point cannot be marked on a curve, and re-deriving it would
+    # mean re-running the model on validation.
+    #
+    # split_mode is recorded because these probabilities are only meaningful
+    # against the test set they came from: the row-wise and domain-disjoint
+    # splits produce test sets of different sizes AND different contents.
+    # Anything loading this file must check before trusting it.
     REPORTS.mkdir(exist_ok=True)
-    np.save(REPORTS / "cnn_test_probs.npy", test_probs)
-    print(f"\nwrote {REPORTS / 'cnn_test_probs.npy'}")
+    np.savez(
+        REPORTS / "cnn_test.npz",
+        test_probs=test_probs,
+        threshold=threshold,
+        split_mode="domain-disjoint" if GROUP_BY_DOMAIN else "row-wise",
+    )
+    print(f"\nwrote {REPORTS / 'cnn_test.npz'}")
 
 
 if __name__ == "__main__":
