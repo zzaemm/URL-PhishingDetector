@@ -58,7 +58,14 @@ import torch
 import torch.nn as nn
 from sklearn.metrics import classification_report, confusion_matrix, roc_auc_score
 
-from evaluate import FALSE_ALARM_COST, pick_threshold, score_at, split_three_ways
+from evaluate import (
+    FALSE_ALARM_COST,
+    GROUP_BY_DOMAIN,
+    pick_threshold,
+    registered_domain,
+    score_at,
+    split_three_ways,
+)
 
 ROOT = Path(__file__).parent.parent
 REFERENCE_PATH = ROOT / "data" / "raw" / "reference.csv"
@@ -223,15 +230,22 @@ def main() -> None:
 
     df = pd.read_csv(REFERENCE_PATH)
 
-    # Same split function, same seed as evaluate.py. reference.csv and
-    # features.csv are row-aligned, so this is the identical test set the
-    # other two models were scored on.
+    # Same split function, same seed, same grouping setting as evaluate.py.
+    # reference.csv and features.csv are row-aligned, so this is the
+    # identical test set the other two models were scored on.
+    groups = df["url"].map(registered_domain) if GROUP_BY_DOMAIN else None
     urls_train, urls_val, urls_test, y_train, y_val, y_test = split_three_ways(
-        df["url"], df["label"]
+        df["url"], df["label"], groups
     )
 
     vocab = build_vocab(urls_train)
-    print(f"train {len(urls_train)}   validation {len(urls_val)}   test {len(urls_test)}")
+    mode = "domain-disjoint" if GROUP_BY_DOMAIN else "row-wise"
+    print(f"SPLIT: {mode}")
+    print(
+        f"train {len(urls_train)} ({y_train.mean():.1%} phishing)   "
+        f"validation {len(urls_val)} ({y_val.mean():.1%})   "
+        f"test {len(urls_test)} ({y_test.mean():.1%})"
+    )
     print(f"vocabulary: {len(vocab)} characters seen in training")
 
     x_train = encode(urls_train, vocab)
@@ -267,8 +281,10 @@ def main() -> None:
     print(f"  missed attacks:                    {fn}\n")
     print(classification_report(y_test, predictions, target_names=["benign", "phishing"]))
 
-    print("For comparison, gradient boosting on the same test set:")
-    print("  AUC 0.949   precision 0.844   recall 0.903   191 false alarms   111 missed")
+    print("For comparison, run `python src/evaluate.py` -- same split, same")
+    print("threshold policy, same test set. Under the ROW-WISE split gradient")
+    print("boosting scored AUC 0.949 and this CNN 0.979; both are inflated by")
+    print("domain overlap, so compare like with like.")
 
     # Saved so week 5 can compare all three models without retraining.
     REPORTS.mkdir(exist_ok=True)

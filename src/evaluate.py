@@ -26,17 +26,45 @@ Run from the project root:
 """
 
 from pathlib import Path
+from urllib.parse import urlparse
 
 import pandas as pd
 from sklearn.ensemble import HistGradientBoostingClassifier
 from sklearn.inspection import permutation_importance
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import classification_report, confusion_matrix, roc_auc_score
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import GroupShuffleSplit, train_test_split
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 
-FEATURES_PATH = Path(__file__).parent.parent / "data" / "raw" / "features.csv"
+RAW = Path(__file__).parent.parent / "data" / "raw"
+FEATURES_PATH = RAW / "features.csv"
+REFERENCE_PATH = RAW / "reference.csv"
+
+# Split by domain rather than by row.
+#
+# THE PROBLEM THIS FIXES
+#
+# A plain random split puts individual URLs in train or test independently.
+# But URLs are not independent: one phishing kit produces hundreds of URLs on
+# the same host. In this dataset 51% of test URLs share a registered domain
+# with a training URL, 33% share an exact hostname, and a single host appears
+# 237 times -- about 3% of the whole dataset is one attacker's campaign.
+#
+# So a random split lets a model recognise a domain it has already been
+# trained on and score well without generalising at all. Measured on the
+# week 4 models, the inflation is worth roughly 2 points of AUC:
+#
+#                        all test   seen domain   unseen domain
+#     CNN                  0.979       0.991          0.960
+#     Gradient boosting    0.949       0.961          0.933
+#
+# Grouping by domain forces every URL from a given domain into exactly one
+# split, so the test set contains only domains the model has never seen. The
+# numbers drop. The lower numbers are the honest ones.
+#
+# Set False to reproduce the old row-wise split for comparison.
+GROUP_BY_DOMAIN = True
 
 # What a false alarm costs relative to a missed attack. At 1.0 both are
 # equally bad and we optimise plain F1. Raise it if blocking a safe site is
@@ -61,21 +89,94 @@ FEATURES_PATH = Path(__file__).parent.parent / "data" / "raw" / "features.csv"
 FALSE_ALARM_COST = 0.5
 
 
-def split_three_ways(X, y):
+def registered_domain(url: str) -> str:
+    """Return the last two labels of the hostname, e.g. 'evil.com'.
+
+    Deliberately crude. A proper public-suffix list would treat 'bbc.co.uk'
+    as one registrable domain where this returns 'co.uk', lumping every UK
+    site into one group. That makes the split MORE conservative, not less --
+    over-grouping can only move URLs out of the test set, never leak them in
+    -- so it is a safe approximation and avoids a tldextract dependency.
+    """
+    try:
+        hostname = urlparse(url if "//" in url else "http://" + url).hostname or ""
+    except ValueError:
+        hostname = ""
+    hostname = hostname.lower()
+    if hostname.startswith("www."):
+        hostname = hostname[4:]
+    parts = hostname.split(".")
+    return ".".join(parts[-2:]) if len(parts) >= 2 else (hostname or "unknown")
+
+
+def domain_groups(n_rows: int) -> pd.Series:
+    """One group label per row of features.csv, taken from reference.csv.
+
+    features.csv has no url column -- it is 25 numbers plus a label. But the
+    two files are row-aligned (features.py writes one row per input row, in
+    order), so row i of features.csv describes row i of reference.csv. The
+    length check below is what guards that assumption: if the files ever
+    drift apart, this fails loudly instead of silently grouping by the wrong
+    URLs, which would look like it worked while leaking domains.
+    """
+    reference = pd.read_csv(REFERENCE_PATH)
+    if len(reference) != n_rows:
+        raise ValueError(
+            f"reference.csv has {len(reference)} rows but features.csv has {n_rows}. "
+            "They must be row-aligned to group by domain -- rerun features.py."
+        )
+    return reference["url"].map(registered_domain)
+
+
+def split_three_ways(X, y, groups=None):
     """Split into train / validation / test as 60 / 20 / 20.
 
-    train_test_split only cuts in two, so we call it twice: first peel off
-    the test set, then split what remains into train and validation.
-    stratify keeps the phishing/benign ratio identical in every split.
+    Two modes.
+
+    groups=None -- the original row-wise split. Each URL is assigned
+    independently and stratify keeps the class ratio identical everywhere.
+    Fast, balanced, and optimistic: related URLs land on both sides.
+
+    groups=<domain per row> -- a domain-disjoint split. Every URL from a
+    given domain goes entirely into one split, so the test set contains only
+    domains the model has never trained on. Note what this costs: we can no
+    longer stratify, because class balance is a property of whole domains
+    rather than individual rows. The splits will not be exactly 60/20/20 by
+    row count either, since domains differ enormously in size -- one of them
+    carries 237 URLs. main() prints the actual sizes and balance.
     """
-    X_temp, X_test, y_temp, y_test = train_test_split(
-        X, y, test_size=0.2, stratify=y, random_state=42
+    if groups is None:
+        X_temp, X_test, y_temp, y_test = train_test_split(
+            X, y, test_size=0.2, stratify=y, random_state=42
+        )
+        # 0.25 of the remaining 80% is 20% of the original.
+        X_train, X_val, y_train, y_val = train_test_split(
+            X_temp, y_temp, test_size=0.25, stratify=y_temp, random_state=42
+        )
+        return X_train, X_val, X_test, y_train, y_val, y_test
+
+    groups = pd.Series(groups).reset_index(drop=True)
+
+    # Peel off the test domains, then split the rest into train and val.
+    # Same two-step shape as above, same seed, but cutting on whole groups.
+    splitter = GroupShuffleSplit(n_splits=1, test_size=0.2, random_state=42)
+    temp_rows, test_rows = next(splitter.split(X, y, groups))
+
+    inner = GroupShuffleSplit(n_splits=1, test_size=0.25, random_state=42)
+    train_local, val_local = next(
+        inner.split(X.iloc[temp_rows], y.iloc[temp_rows], groups.iloc[temp_rows])
     )
-    # 0.25 of the remaining 80% is 20% of the original.
-    X_train, X_val, y_train, y_val = train_test_split(
-        X_temp, y_temp, test_size=0.25, stratify=y_temp, random_state=42
+    train_rows = temp_rows[train_local]
+    val_rows = temp_rows[val_local]
+
+    return (
+        X.iloc[train_rows],
+        X.iloc[val_rows],
+        X.iloc[test_rows],
+        y.iloc[train_rows],
+        y.iloc[val_rows],
+        y.iloc[test_rows],
     )
-    return X_train, X_val, X_test, y_train, y_val, y_test
 
 
 def score_at(probabilities, y_true, threshold, false_alarm_cost=FALSE_ALARM_COST):
@@ -194,9 +295,35 @@ def main() -> None:
     X = df.drop(columns=["label"])
     y = df["label"]
 
-    splits = split_three_ways(X, y)
+    groups = domain_groups(len(df)) if GROUP_BY_DOMAIN else None
+    splits = split_three_ways(X, y, groups)
     X_train, X_val, X_test = splits[0], splits[1], splits[2]
-    print(f"train {len(X_train)}   validation {len(X_val)}   test {len(X_test)}")
+    y_train, y_val, y_test = splits[3], splits[4], splits[5]
+
+    if GROUP_BY_DOMAIN:
+        print(f"SPLIT: domain-disjoint ({groups.nunique()} distinct domains)")
+    else:
+        print("SPLIT: row-wise (domains leak across splits -- optimistic)")
+
+    # Grouped splits cannot be stratified, so class balance drifts and the
+    # row counts will not be exactly 60/20/20. Print both rather than assume.
+    for label, X_part, y_part in [
+        ("train", X_train, y_train),
+        ("validation", X_val, y_val),
+        ("test", X_test, y_test),
+    ]:
+        print(
+            f"  {label:<11} {len(X_part):>6} rows   "
+            f"{y_part.mean():.1%} phishing"
+        )
+
+    if GROUP_BY_DOMAIN:
+        # Cheap assertion that the grouping actually worked. If any domain
+        # appears in both train and test the split is silently broken, and
+        # every number below it is meaningless.
+        overlap = set(groups.iloc[X_train.index]) & set(groups.iloc[X_test.index])
+        print(f"  domains in both train and test: {len(overlap)} (must be 0)")
+
     print(f"{X.shape[1]} features")
 
     results = []
