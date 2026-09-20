@@ -3,9 +3,18 @@
 A machine learning classifier that predicts whether a URL is phishing or benign
 from the **text of the URL alone** — no network requests to the URLs themselves.
 
-Built as an undergraduate project in AI applied to cyber security. The
-interesting part of this repo is not the accuracy number; it is the record of
-finding out that the first accuracy number was fake.
+Built as an undergraduate project in AI applied to cyber security.
+
+**The finding:** a character-level CNN reading the raw URL beats 25
+hand-engineered features — because a handwritten list can only contain the
+words you already thought of. `num_phish_hints` cannot match
+`serviceactivation` or `ingbancoservice` unless someone sat down and added
+them. The CNN built its own lexicon from characters, so it isn't limited to
+anyone's imagination. Evidence in [Findings](#findings) 6 and 7.
+
+The second thing worth reading here is not an accuracy number at all: it is
+the record of two separate occasions where a good-looking score turned out to
+be measuring the wrong thing, and what the number became after it was fixed.
 
 ---
 
