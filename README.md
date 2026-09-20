@@ -11,7 +11,7 @@ finding out that the first accuracy number was fake.
 
 ## Status
 
-**Week 4 of 8 complete.** Three models, a domain-disjoint split, thresholds
+**Week 5 of 8 complete.** Four models, a domain-disjoint split, thresholds
 chosen on validation under an explicit cost policy, test set evaluated once.
 
 | Model | AUC | Precision | Recall | False alarms | Missed attacks |
@@ -19,6 +19,10 @@ chosen on validation under an explicit cost policy, test set evaluated once.
 | Logistic regression (25 features) | 0.866 | 0.726 | 0.859 | 450 | 195 |
 | Gradient boosting (25 features) | 0.917 | 0.806 | 0.880 | 293 | 167 |
 | **Character-level CNN (raw URL)** | **0.956** | **0.847** | **0.935** | **234** | **90** |
+| CNN + gradient boosting ensemble | 0.960 | 0.863 | 0.927 | 204 | 101 |
+
+**The shipped model is the CNN, not the ensemble** — see
+[Why the ensemble isn't shipped](#why-the-ensemble-isnt-shipped).
 
 Held-out test set: 2,587 URLs, 53.6% phishing. Every URL from a given registered
 domain falls entirely inside one split, so no model has seen any test domain
@@ -93,6 +97,31 @@ not strictly comparable across the two splits. AUC is.
 
 Setting `GROUP_BY_DOMAIN = False` reproduces the old behaviour for comparison.
 
+### The same principle applies to subsampling
+
+`learning_curve.py` shrinks the training set to ask whether collecting more
+data would be worth it. There are two ways to shrink it, and they give
+opposite answers.
+
+Keep 10% of the **URLs** and you still hold a few URLs from nearly every
+domain. Since the test set is domain-disjoint, what is being measured is
+generalisation to *unseen* websites — and broad shallow exposure is exactly
+what transfers. So that point scores far better than a genuinely 10%-sized
+dataset could. Every small point is lifted, the curve flattens, and the
+conclusion becomes "more data will not help" when the opposite may be true.
+
+Keep 10% of the **domains** and all their URLs, and the smaller set is
+honestly smaller: few sites, known deeply, no secret breadth.
+
+The lumpiness sharpens it — one host carries 237 URLs, so a 10% row sample
+still retains ~24 near-identical URLs from that single phishing kit.
+
+Domain-wise sampling also makes the x-axis actionable. This dataset grows by
+acquiring new **sites** — that is exactly what `accumulate.py` does daily. So
+a point at "4,000 domains" corresponds to a collection effort that could
+actually be undertaken. A row-wise x-axis corresponds to nothing anyone could
+go and do.
+
 ---
 
 ## The score arc
@@ -143,6 +172,40 @@ artifact) to 47.4 / 74.9 (a 1.58× gap, plausibly real signal).
 **The lesson:** a suspiciously good score is a bug report. If two classes were
 collected in different ways, the model will find that difference before it finds
 anything you care about.
+
+---
+
+## Why the ensemble isn't shipped
+
+Error analysis showed the CNN and gradient boosting fail in opposite
+directions — 304 test URLs the CNN rescues, 168 the reverse, with
+mechanically different causes (see Findings 8 and 9). That is a textbook case
+for ensembling, and the prediction was made before running it.
+
+Nine blending strategies were scored on **validation**; one winner was chosen
+there and only that one touched test. Picking the best blend by its test score
+would be the same cheat the three-way split exists to prevent, moved one level
+up: neither model would have seen test, but the ensemble would have been
+fitted to it.
+
+It worked, barely. 204 false alarms against the CNN's 234, 101 missed attacks
+against 90 — 19 fewer errors out of 2,587, about 2%.
+
+**Three reasons it is reported rather than shipped:**
+
+*The gain is near the noise floor.* Validation predicted +0.009 AUC; test
+delivered +0.004. That gap is the cost of selecting a winner from nine
+candidates, and it is visible only because the selection happened on
+validation.
+
+*The choice was close to arbitrary.* The top three strategies scored 0.915,
+0.914 and 0.914 on validation. The reported result is one draw from three
+near-identical options, not a decisive winner.
+
+*The engineering cost is real.* Shipping the ensemble means two models, both
+torch and scikit-learn at inference, two artefacts to keep in sync — for
++0.004 AUC and slightly *worse* recall, which is the direction the cost policy
+says to favour. The CNN alone is shipped.
 
 ---
 
@@ -313,14 +376,79 @@ feature vectors and are completely different objects. A convolution sees order;
 `num_hyphens` cannot. That information is unrecoverable by adding more counting
 features, which is the honest limit of the feature-engineering approach here.
 
-**7. A model can be beaten by its own preprocessing.** `cnn.py` truncates URLs
-at `MAX_LEN = 200` characters. An attacker who knows that can pad the front of a
-URL with innocuous path segments and push the incriminating part past the
-cut-off, where the model cannot see it at all. This is a total evasion arising
-from an implementation choice rather than from anything about phishing, and it
-is cheaper than any mutation on the week 6 list. Gradient boosting does not
-share it — its features are computed over the whole string. Scheduled as the
-first week 6 test.
+**7. The two models fail in mechanically opposite directions.** Gradient
+boosting reads *structure*; the CNN reads *vocabulary*. Concretely:
+
+```
+                                                            gb     cnn
+stackoverflow.com/questions/44481051/relational-db-designing  0.92   0.12
+jugendmigrationsdienste.de/                                   0.52   0.01
+lender.sandbox.natwest.poweredbydivido.com/                   0.99   0.47
+sites.google.com/view/serviceactivation                       0.01   0.52
+```
+
+Gradient boosting blocks Stack Overflow because deep path + digits + hyphens
+is all it can see. The CNN clears it because `relational-database-designing`
+reads as English. But the CNN shrugs at the NatWest URL — a bank name buried
+four subdomains deep — which `num_subdomains` catches instantly.
+
+This sharpens finding 6. The CNN's edge is not only character *order*; it is
+that `num_phish_hints` is a **closed list written by hand**, so it cannot
+contain `serviceactivation` or `ingbancoservice` unless someone thought of
+them first. The CNN built its own lexicon from characters. A handwritten
+feature can only encode what you already knew.
+
+**8. Complementary errors do not compound.** 472 disagreements looked like
+large ensemble headroom. The realised gain was 2%. The reason is that the
+disagreements are precisely the URLs where *both* models are least confident
+— averaging two uncertain scores yields an uncertain score. Models agree on
+the easy cases, and agreement there adds nothing.
+
+**9. The models are most wrong about the sites they exist to protect.** 112
+test URLs defeat all three models; 91 are false alarms on legitimate sites,
+and 28 of those — a quarter of the entire hard core — are `*.tumblr.com`. A
+user subdomain on a shared platform is lexically indistinguishable from
+phishing on that same platform, and the domain-disjoint split guarantees the
+platform was never seen in training.
+
+The sharpest single case:
+
+```
+commbank.com.au/personal/accounts/transaction-accounts.html → flagged by all three
+```
+
+The Commonwealth Bank of Australia's real transaction-accounts page. The
+models learned that banking vocabulary signals phishing — because phishing
+imitates banks — so they penalise the genuine article.
+
+**10. The dataset contains label noise.** `wisegeek.com/what-is-a-form-w-9.htm`
+and `poorlydrawnlines.com/comic/fashionable/` are both labelled phishing. One
+is a reference site, the other a webcomic. Two obvious errors in a small
+sample implies the "hard core" is partly dataset error rather than model
+failure — which puts a ceiling on achievable accuracy that no model can cross.
+Quantifying that rate is outstanding.
+
+**11. A predicted weakness that did not show up.** `cnn.py` truncates URLs at
+`MAX_LEN = 200` characters, so an attacker who knows the cut-off could pad the
+front of a URL and push the incriminating part out of view. The prediction was
+that the CNN would therefore be disproportionately wrong on long URLs. It is
+not — the opposite:
+
+| model | error rate (≤200 chars) | error rate (>200) |
+|---|---|---|
+| Logistic regression | 25.4% | 3.4% |
+| Gradient boosting | 18.2% | 0.0% |
+| Character-level CNN | 12.8% | 0.0% |
+
+Long URLs are *easier* for every model. All 59 in the test set are phishing
+with obviously stuffed paths, so the evidence sits well inside the first 200
+characters.
+
+The prediction is untested rather than disproved: the attack requires a
+benign-looking prefix with the payload past the cut-off, and no such URL
+exists in this data because no attacker is currently targeting this model.
+Week 6 has to construct it rather than look for it. Recording the failed
+prediction alongside the successful ones is deliberate.
 
 ---
 
@@ -330,15 +458,17 @@ first week 6 test.
 - [x] **Week 2** — fix collection leakage, expand to 25 features
 - [x] **Week 3** — three-way split, gradient boosting, cost-aware threshold policy, PR curves
 - [x] **Week 4** — character-level CNN in PyTorch, domain-disjoint split
-- [ ] **Week 5** — model comparison, error analysis, learning curves, recall against live phishing
+- [x] **Week 5** — error analysis, model disagreement, ensemble
 - [ ] **Week 6** — adversarial evasion testing
 - [ ] **Week 7** — FastAPI endpoint, CLI, packaging
 - [ ] **Week 8** — write-up
 
-Week 6 is the intended headline. The feature list above is, read the other way,
-an evasion guide: it says exactly what to change about a URL to slip past this
-model. The plan is to apply those mutations to phishing URLs the model currently
-catches and measure how far recall collapses.
+Week 6 is the intended headline, and error analysis changed what it should
+test. The original plan was obfuscation — shorten the URL, strip phishing
+vocabulary, flatten the path. But findings 9 and 10 point at a cheaper attack:
+the models cannot distinguish benign shared hosting from phishing on the same
+platform, and they clear anything that reads like plain English. So the
+evasion to measure is **looking legitimate**, not hiding.
 
 ---
 
@@ -351,6 +481,8 @@ catches and measure how far recall collapses.
 | `src/features.py` | Extracts the 25 lexical features. |
 | `src/evaluate.py` | **Current evaluator.** Domain-disjoint split, both feature models, cost-policy sweep, permutation importance. Owns the split used by every model. |
 | `src/cnn.py` | **Best model.** Character-level CNN in PyTorch. Same split and threshold policy, imported from `evaluate.py`. |
+| `src/ensemble.py` | Blends the CNN with gradient boosting. Nine strategies scored on validation, one chosen, test touched once. |
+| `src/error_analysis.py` | Reads the URLs each model gets wrong. Writes a defanged dump to gitignored `data/`. |
 | `src/plot_curves.py` | Precision-recall and ROC curves → `reports/`. |
 | `src/train.py` | Week 1–2 baseline. Superseded, kept as the reference point the story is told against. |
 | `src/get_data.py` | Week 1 OpenPhish+Tranco builder. Superseded — this is the code that produced the artifact. |
