@@ -166,13 +166,31 @@ def main() -> None:
     print(f"  missed attacks:                    {fn}\n")
     print(classification_report(y_test, predictions, target_names=["benign", "phishing"]))
 
+    # Computed live, not hardcoded. An earlier version pinned these as
+    # literals and they went stale the moment the CNN was retrained after the
+    # truncation fix -- the script kept confidently reporting a model that no
+    # longer existed. Anything printed for comparison should be measured on
+    # the spot, not remembered from a previous run.
+    gb_threshold = pick_threshold(gb_val, y_val, FALSE_ALARM_COST)
+    cnn_threshold = float(saved["threshold"])
+
     print("Single models on this same test set, for reference:")
-    print("  gradient boosting  AUC 0.917   293 false alarms   167 missed")
-    print("  character CNN      AUC 0.956   234 false alarms    90 missed")
+    for name, probs, threshold in [
+        ("gradient boosting", gb_test, gb_threshold),
+        ("character CNN   ", cnn_test, cnn_threshold),
+    ]:
+        flagged = probs >= threshold
+        false_alarms = int((flagged & (y_test == 0)).sum())
+        missed = int((~flagged & (y_test == 1)).sum())
+        print(
+            f"  {name}  AUC {roc_auc_score(y_test, probs):.3f}   "
+            f"{false_alarms} false alarms   {missed} missed"
+        )
+
     print(
         "\nIf the ensemble does not beat the CNN alone, that is a result too:\n"
-        "it would mean the 168 URLs gradient boosting rescues are outweighed\n"
-        "by the confidence it drags down elsewhere."
+        "it would mean the URLs gradient boosting rescues are outweighed by\n"
+        "the confidence it drags down elsewhere."
     )
 
 

@@ -31,11 +31,11 @@ evaded 97.5% of the time by an attacker who simply looks ordinary).
 | Logistic regression (25 features) | 0.866 | 0.726 | 0.859 | 450 | 195 |
 | Gradient boosting (25 features) | 0.917 | 0.806 | 0.880 | 293 | 167 |
 | **Character-level CNN (raw URL)** | **0.961** | **0.819** | **0.952** | **291** | **67** |
-| CNN + gradient boosting ensemble | 0.960 | 0.863 | 0.927 | 204 | 101 |
+| CNN + gradient boosting ensemble | 0.964 | 0.887 | 0.908 | 160 | 128 |
 
-The CNN figures are post-truncation-fix (head+tail windowing). Before it, the
-same model scored 0.956 / 0.847 / 0.935. The ensemble row predates the fix and
-is stale by that much — it is reported for the methodology, not shipped.
+All figures are post-truncation-fix (head+tail windowing). Before it, the CNN
+scored 0.956 / 0.847 / 0.935. The ensemble edges the CNN on AUC but is **not
+shipped** — see [Why the ensemble isn't shipped](#why-the-ensemble-isnt-shipped).
 
 **The shipped model is the CNN, not the ensemble** — see
 [Why the ensemble isn't shipped](#why-the-ensemble-isnt-shipped).
@@ -55,8 +55,11 @@ different objects. Convolutions see sequence; counts do not.
 
 ![Precision-recall curve](reports/pr_curve.png)
 
-*(Curve currently reflects the earlier row-wise split — regenerating it under the
-domain-disjoint split is outstanding.)*
+Every point on a curve is one possible decision threshold. The CNN sits above
+both feature models at *every* threshold — a stronger claim than comparing
+them at one operating point. Circles mark the reported operating points; the
+dotted line is what flagging every URL would score on this test set, the floor
+any real model must beat.
 
 **Caveat stated up front:** the test set is roughly balanced. Real traffic is not
 — benign URLs outnumber phishing by orders of magnitude. Under that imbalance
@@ -204,24 +207,37 @@ would be the same cheat the three-way split exists to prevent, moved one level
 up: neither model would have seen test, but the ensemble would have been
 fitted to it.
 
-It worked, barely. 204 false alarms against the CNN's 234, 101 missed attacks
-against 90 — 19 fewer errors out of 2,587, about 2%.
+It works — slightly. AUC **0.964** against the CNN's 0.961.
+
+But look at what the operating point actually does:
+
+| | false alarms | missed attacks | weighted cost @ 0.5 |
+|---|---|---|---|
+| Character CNN | 291 | **67** | 425 |
+| Ensemble | **160** | 128 | 416 |
+
+It halves false alarms by **nearly doubling missed attacks**. Under the
+project's stated cost policy that nets out to a 2% improvement — and a 2%
+improvement is not what "nearly doubling the misses" feels like. This is a
+case where the policy constant and the intuition disagree, and it is worth
+noticing rather than deferring to the arithmetic.
 
 **Three reasons it is reported rather than shipped:**
 
-*The gain is near the noise floor.* Validation predicted +0.009 AUC; test
-delivered +0.004. That gap is the cost of selecting a winner from nine
-candidates, and it is visible only because the selection happened on
-validation.
+*The choice is not robust.* The top two strategies tied at 0.917 on
+validation. Concretely: running the identical script on two machines with
+different scikit-learn versions selected **different winners** — "mean of
+ranks" on one, "mean of probabilities" on the other. A result that flips on a
+library patch version is not a finding.
 
-*The choice was close to arbitrary.* The top three strategies scored 0.915,
-0.914 and 0.914 on validation. The reported result is one draw from three
-near-identical options, not a decisive winner.
+*The gain is near the noise floor.* Validation predicted a larger margin than
+test delivered, which is the normal penalty for picking the best of nine
+candidates. It is visible at all only because the selection happened on
+validation and test was touched once.
 
-*The engineering cost is real.* Shipping the ensemble means two models, both
-torch and scikit-learn at inference, two artefacts to keep in sync — for
-+0.004 AUC and slightly *worse* recall, which is the direction the cost policy
-says to favour. The CNN alone is shipped.
+*The engineering cost is real.* Shipping the ensemble means two models, torch
+*and* scikit-learn at inference, two artefacts to keep in sync — for +0.003
+AUC and 61 more phishing URLs through the net. The CNN alone is shipped.
 
 ---
 
