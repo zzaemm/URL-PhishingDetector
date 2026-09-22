@@ -252,14 +252,17 @@ August 2026. `src/live_recall.py` runs the trained models over that pool —
 **3,464 phishing URLs, ten collection dates** — using thresholds chosen on
 validation, never retuned here.
 
-| Slice | n | Logistic regression | Gradient boosting |
-|---|---|---|---|
-| **All live phishing** | 3,464 | **88.0%** | **85.7%** |
-| domain seen in training | 355 | 89.9% | 91.5% |
-| domain unseen *(the honest number)* | 3,109 | 87.8% | 85.0% |
+| Slice | n | LR | GB | CNN |
+|---|---|---|---|---|
+| **All live phishing** | 3,464 | 88.0% | 85.7% | 77.5% |
+| domain seen in training | 355 | 89.9% | 91.5% | 62.0% |
+| domain unseen *(the honest number)* | 3,109 | 87.8% | 85.0% | 79.3% |
 
-Roughly 85% of currently-live phishing, from a source the models never
-trained on, six years after the training data was collected.
+Roughly 86% of currently-live phishing, from a source the models never trained
+on, six years after the training data was collected.
+
+The CNN runs here through `cnn_numpy.py` — the same weights with a NumPy
+forward pass, verified against PyTorch's own outputs to 5e-07.
 
 ### What this is not
 
@@ -270,20 +273,37 @@ OpenPhish phishing differs from pirocheto phishing. Those cannot be
 separated, so the claim stays narrow: *recall against contemporary live
 phishing from a different source.*
 
-**Not a model comparison.** Logistic regression scores higher than gradient
-boosting here, and that means nothing. Recall alone cannot rank models — a
-model flagging everything scores 100%. LR simply sits at a looser threshold
-and would raise more false alarms, which this pool cannot measure because it
-contains no benign URLs. Comparing *slices within one model* is valid;
-comparing models on recall alone is the same mistake as judging by accuracy.
+**Not a model comparison — and the table above is a trap.** Read down that
+first row and the CNN looks far worse than the feature models on live data,
+reversing the benchmark result. It does not mean that. Recall alone cannot
+rank models: anything that flags everything scores 100%. The three thresholds
+differ (LR 0.28, GB 0.26, CNN 0.40), so the CNN is simply the most
+conservative of the three.
+
+The control settles it. Lower the CNN's cut-off until it flags the *same
+number* of URLs as gradient boosting:
+
+```
+CNN recall at a matched flag count: 85.7%   (gradient boosting: 85.7%)
+```
+
+Identical. The entire apparent gap was the operating point. The pool has no
+benign URLs, so there is no way to compare these models properly here — that
+would need a live benign sample, and collecting one is the obvious next step
+if this were carried further.
+
+What *is* comparable: slices within a single model, and the models' overlap.
+The CNN catches 334 URLs gradient boosting misses; gradient boosting catches
+616 the CNN misses; only **163 of 3,464 defeat both**. Substantial
+disagreement, same as on the test set.
 
 ### Length explains more than time does
 
-| URL length | n | LR | GB |
-|---|---|---|---|
-| ≤ 40 chars | 1,684 | 80.2% | 79.9% |
-| 41–80 | 1,472 | 95.0% | 89.7% |
-| > 80 | 308 | 97.4% | 98.1% |
+| URL length | n | LR | GB | CNN |
+|---|---|---|---|---|
+| ≤ 40 chars | 1,684 | 80.2% | 79.9% | 69.8% |
+| 41–80 | 1,472 | 95.0% | 89.7% | 82.0% |
+| > 80 | 308 | 97.4% | 98.1% | 98.1% |
 
 Training phishing has a median length of 55 characters; the live pool's is
 **41**. Missed URLs have a median of 32, caught ones 42. So a substantial part
@@ -314,8 +334,61 @@ predicts. The eyeball sample carried no information — a base-rate error, and
 the third time in this project that a plausible reading of a small sample
 turned out to be an artifact of how the sample was drawn.
 
-*Outstanding: the CNN is absent from this table — scoring new URLs needs torch,
-which Windows Application Control currently blocks on the dev machine.*
+---
+
+## Inference without PyTorch
+
+Training needs PyTorch. Inference does not.
+
+The CNN is an embedding lookup, three 1-D convolutions, a ReLU, a max-pool and
+one linear layer. `src/cnn_numpy.py` writes that forward pass out in NumPy;
+`src/export_numpy_model.py` pulls the weights out of `models/cnn.pt` into a
+240 KB `.npz`. The CLI, the live-recall evaluation and anything else that
+scores a URL then run with **NumPy alone**.
+
+Two reasons, and the second is the better one:
+
+**Practical.** Windows Application Control blocks torch's DLLs on the dev
+machine. Without this, every scoring run needed Colab.
+
+**It is the right way to ship regardless.** A command-line tool that pulls in
+a 300 MB deep-learning framework to classify a string is a poor deliverable.
+This version imports instantly and runs anywhere NumPy does.
+
+Reimplementing a model by hand is exactly the kind of change that breaks
+silently — nothing crashes, the numbers just quietly drift. So it is checked
+against the original:
+
+```
+$ python src/cnn_numpy.py --verify
+compared 2587 test URLs against PyTorch's own output
+  max absolute difference : 4.768e-07
+  mean absolute difference: 2.493e-08
+  identical verdicts      : 2587/2587
+PASS -- the NumPy model reproduces PyTorch. Safe to ship.
+```
+
+Float32 accumulation order differs between the two libraries, so exact
+equality was never expected; 5e-07 is noise. Every verdict matches. Run
+`--verify` after any change to either file — `cnn_numpy.py` duplicates the
+architecture *and* the URL encoding from `cnn.py`, and that duplication is
+only safe because it is checked.
+
+```
+$ python src/cnn_numpy.py "https://www.commbank.com.au/personal/accounts/transaction-accounts.html" \
+                          "http://paypal.com.secure-verify.tk/login/update.php" \
+                          "https://stackoverflow.com/questions/44481051/relational-database-designing" \
+                          "https://notes-recipe.weebly.com/for-tricks-about-the"
+PHISHING   0.780  https://www.commbank.com.au/personal/...
+PHISHING   1.000  http://paypal.com.secure-verify.tk/login/update.php
+benign     0.052  https://stackoverflow.com/questions/44481051/...
+benign     0.010  https://notes-recipe.weebly.com/for-tricks-about-the
+```
+
+Four of this project's findings in one command: a real bank's real page
+flagged (finding 9), textbook phishing caught outright, Stack Overflow
+correctly cleared where gradient boosting scores it 0.92 (finding 7), and
+week 6's camouflage attack walking straight through at 0.010.
 
 ---
 
@@ -714,9 +787,9 @@ shared hosting from phishing on the same platform, and they clear anything
 reading like plain English. Measuring **looking legitimate** rather than
 hiding is what produced the 97.5% evasion result.
 
-Outstanding: the CNN's live-phishing recall and its learning curve (both need
-torch, currently blocked locally by Windows Application Control), and the
-label-noise rate from finding 10.
+Outstanding: the CNN's learning curve (training still needs torch, so Colab),
+a live *benign* sample so the models can be compared properly on live data,
+and the label-noise rate from finding 10.
 
 ---
 
@@ -733,6 +806,8 @@ label-noise rate from finding 10.
 | `src/error_analysis.py` | Reads the URLs each model gets wrong. Writes a defanged dump to gitignored `data/`. |
 | `src/adversarial.py` | **Week 6.** Edits caught phishing the way an attacker would; measures recall collapse. |
 | `src/live_recall.py` | Recall against the live OpenPhish pool, with the length/domain/time confounds separated. |
+| `src/cnn_numpy.py` | **Inference without PyTorch.** NumPy forward pass + `--verify` against the real model. Doubles as the CLI. |
+| `src/export_numpy_model.py` | `models/cnn.pt` → a 240 KB NumPy `.npz`. Works with or without torch installed. |
 | `src/learning_curve.py` | AUC against training size, subsampled by domain. |
 | `colab/week6_adversarial.ipynb` | Runs `cnn.py` and `adversarial.py` on Colab, since Windows Application Control blocks torch locally. |
 | `src/plot_curves.py` | Precision-recall and ROC curves → `reports/`. |

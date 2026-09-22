@@ -87,34 +87,24 @@ def defang(url: str) -> str:
 
 
 def load_cnn_scorer():
-    """Return a function scoring URLs with the saved CNN, or None if torch is absent.
+    """Return (score_fn, threshold) for the CNN, or None with a reason.
 
-    Torch is optional on purpose. Windows Application Control blocks it on the
-    dev machine, and the feature-model half of this analysis is still worth
-    having. A missing CNN degrades the report; it does not block it.
+    Uses the NumPy export rather than torch. Same weights, same outputs --
+    verified against PyTorch's own test-set probabilities by
+    `python src/cnn_numpy.py --verify` -- but no deep-learning framework at
+    inference, so this runs on a machine where torch is blocked.
     """
     try:
-        import torch
-
-        from cnn import RESERVED, CharCNN, encode
+        from cnn_numpy import NumpyCharCNN
     except Exception as error:
-        return None, f"torch unavailable ({type(error).__name__})"
+        return None, f"cnn_numpy unavailable ({type(error).__name__})"
 
-    if not MODEL_PATH.exists():
-        return None, f"{MODEL_PATH.name} not found -- run cnn.py"
+    npz = ROOT / "models" / "cnn_numpy.npz"
+    if not npz.exists():
+        return None, f"{npz.name} not found -- run `python src/export_numpy_model.py`"
 
-    bundle = torch.load(MODEL_PATH, weights_only=False)
-    model = CharCNN(vocab_size=len(bundle["vocab"]) + RESERVED)
-    model.load_state_dict(bundle["state_dict"])
-    model.eval()
-
-    def score(urls):
-        x = encode(list(urls), bundle["vocab"])
-        with torch.no_grad():
-            logits = torch.cat([model(x[i : i + 512]) for i in range(0, len(x), 512)])
-        return torch.sigmoid(logits).numpy()
-
-    return (score, float(bundle["threshold"])), None
+    model = NumpyCharCNN(npz)
+    return (model.predict_proba, model.threshold), None
 
 
 def report(title, frame, models):
