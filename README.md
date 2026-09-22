@@ -241,6 +241,84 @@ AUC and 61 more phishing URLs through the net. The CNN alone is shipped.
 
 ---
 
+## Recall against live phishing
+
+Every result above comes from `pirocheto/phishing-url`, a 2020 research
+dataset. Useful for comparing models; silent on whether any of this works on
+attacks happening this week.
+
+`src/accumulate.py` has been pulling the OpenPhish live feed daily since
+August 2026. `src/live_recall.py` runs the trained models over that pool —
+**3,464 phishing URLs, ten collection dates** — using thresholds chosen on
+validation, never retuned here.
+
+| Slice | n | Logistic regression | Gradient boosting |
+|---|---|---|---|
+| **All live phishing** | 3,464 | **88.0%** | **85.7%** |
+| domain seen in training | 355 | 89.9% | 91.5% |
+| domain unseen *(the honest number)* | 3,109 | 87.8% | 85.0% |
+
+Roughly 85% of currently-live phishing, from a source the models never
+trained on, six years after the training data was collected.
+
+### What this is not
+
+**Not a drift study.** Drift requires holding the source constant and varying
+time. Here both change: training is pirocheto (2020), the pool is OpenPhish
+(2026). A low number could mean phishing has moved on, or simply that
+OpenPhish phishing differs from pirocheto phishing. Those cannot be
+separated, so the claim stays narrow: *recall against contemporary live
+phishing from a different source.*
+
+**Not a model comparison.** Logistic regression scores higher than gradient
+boosting here, and that means nothing. Recall alone cannot rank models — a
+model flagging everything scores 100%. LR simply sits at a looser threshold
+and would raise more false alarms, which this pool cannot measure because it
+contains no benign URLs. Comparing *slices within one model* is valid;
+comparing models on recall alone is the same mistake as judging by accuracy.
+
+### Length explains more than time does
+
+| URL length | n | LR | GB |
+|---|---|---|---|
+| ≤ 40 chars | 1,684 | 80.2% | 79.9% |
+| 41–80 | 1,472 | 95.0% | 89.7% |
+| > 80 | 308 | 97.4% | 98.1% |
+
+Training phishing has a median length of 55 characters; the live pool's is
+**41**. Missed URLs have a median of 32, caught ones 42. So a substantial part
+of the gap is that live phishing is *shorter* — less string, less lexical
+signal — rather than newer. A shorter URL is simply a harder instance of the
+same problem.
+
+Across the ten collection dates recall ranges 81–92% with **no trend**. That
+comparison does hold source constant, so it is the one clean time signal
+available — and a month is far too short a window for real drift, so a flat
+line is the expected result.
+
+### A wrong finding, caught
+
+Reading the missed URLs by hand turned up `vercel.app`, `pages.dev`,
+`blogspot.com`, `github.io` — which looked like direct confirmation that
+week 6's camouflage attack is what live attackers already use. Checked rather
+than assumed:
+
+```
+recall ON shared platforms : 87.2%  (n=1717)
+recall OFF shared platforms: 84.1%  (n=1747)
+```
+
+Shared platforms are slightly **easier**, not harder. Half the entire pool is
+hosted on them, so half the misses being on them is exactly what chance
+predicts. The eyeball sample carried no information — a base-rate error, and
+the third time in this project that a plausible reading of a small sample
+turned out to be an artifact of how the sample was drawn.
+
+*Outstanding: the CNN is absent from this table — scoring new URLs needs torch,
+which Windows Application Control currently blocks on the dev machine.*
+
+---
+
 ## Adversarial evasion
 
 Every number above assumes phishing URLs arrive as attackers happen to write
@@ -636,8 +714,9 @@ shared hosting from phishing on the same platform, and they clear anything
 reading like plain English. Measuring **looking legitimate** rather than
 hiding is what produced the 97.5% evasion result.
 
-Outstanding: quantify the label-noise rate (finding 10), add the CNN's
-learning curve, and run recall against the live OpenPhish pool.
+Outstanding: the CNN's live-phishing recall and its learning curve (both need
+torch, currently blocked locally by Windows Application Control), and the
+label-noise rate from finding 10.
 
 ---
 
@@ -653,6 +732,7 @@ learning curve, and run recall against the live OpenPhish pool.
 | `src/ensemble.py` | Blends the CNN with gradient boosting. Nine strategies scored on validation, one chosen, test touched once. |
 | `src/error_analysis.py` | Reads the URLs each model gets wrong. Writes a defanged dump to gitignored `data/`. |
 | `src/adversarial.py` | **Week 6.** Edits caught phishing the way an attacker would; measures recall collapse. |
+| `src/live_recall.py` | Recall against the live OpenPhish pool, with the length/domain/time confounds separated. |
 | `src/learning_curve.py` | AUC against training size, subsampled by domain. |
 | `colab/week6_adversarial.ipynb` | Runs `cnn.py` and `adversarial.py` on Colab, since Windows Application Control blocks torch locally. |
 | `src/plot_curves.py` | Precision-recall and ROC curves → `reports/`. |
