@@ -70,16 +70,33 @@ from evaluate import (
 ROOT = Path(__file__).parent.parent
 REFERENCE_PATH = ROOT / "data" / "raw" / "reference.csv"
 REPORTS = ROOT / "reports"
+MODELS = ROOT / "models"
 
-# Every URL is padded or cut to this many characters so they stack into a
-# rectangular tensor. 200 covers about 98% of the dataset in full (95th
-# percentile is 131 characters, 99th is 263).
+# HOW MUCH OF THE URL THE MODEL SEES, AND WHY IT IS BOTH ENDS
 #
-# SECURITY NOTE: truncation is an evasion surface. An attacker who knows the
-# cut-off can push the incriminating part of a URL past character 200 and the
-# model will never see it. Week 6 should test exactly that -- it is a cheaper
-# attack than any of the mutations currently on the list.
-MAX_LEN = 200
+# Week 6 measured the cost of the old scheme -- a single 200-character window
+# from the START of the URL. Padding the front with ~210 characters of
+# innocuous path dropped CNN recall from 1.000 to 0.062 on phishing it had
+# previously caught. A 94% evasion, caused entirely by this constant.
+# Gradient boosting, whose features cover the whole string, stayed at 0.959.
+#
+# Raising the limit to 512 would not fix it: the attacker pads 520 instead.
+# Any single window anchored at one end is defeated by padding the other.
+#
+# So the model now reads the first HEAD_LEN characters AND the last TAIL_LEN,
+# joined by a separator token. The host always sits at the front; the payload
+# usually sits at the end. Front-padding no longer blinds the model, because
+# whatever it pushes rightwards lands in the tail window.
+#
+# HONEST LIMIT: this defeats front-padding and back-padding, not middle-
+# padding. An attacker who inflates the MIDDLE of a long URL can still push
+# content out of both windows. That is a more conspicuous URL and a more
+# expensive attack, but it is not impossible -- the fix raises the price, it
+# does not close the hole. A truly length-invariant model would be the real
+# answer and is out of scope here.
+HEAD_LEN = 150
+TAIL_LEN = 150
+MAX_LEN = HEAD_LEN + TAIL_LEN + 1  # +1 for the separator between the windows
 
 EMBED_DIM = 32          # size of each character's learned coordinate
 NUM_FILTERS = 128       # highlighters per width
@@ -93,7 +110,11 @@ PATIENCE = 4            # stop after this many epochs with no validation gain
 
 SEED = 42
 
-PAD, UNK = 0, 1  # reserved IDs: padding, and "character not seen in training"
+# Reserved IDs. SEP marks the join between the head and tail windows, so the
+# model can tell "these two pieces are not adjacent" from a genuinely short
+# URL where they are.
+PAD, UNK, SEP = 0, 1, 2
+RESERVED = 3
 
 
 def build_vocab(train_urls) -> dict:
@@ -105,15 +126,43 @@ def build_vocab(train_urls) -> dict:
     to a genuinely novel character in deployment.
     """
     chars = sorted({character for url in train_urls for character in url})
-    return {character: index + 2 for index, character in enumerate(chars)}
+    return {character: index + RESERVED for index, character in enumerate(chars)}
+
+
+def windows(url: str):
+    """Return the (head, tail) slices of a URL the model will actually read.
+
+    Short URLs pass through whole, with no tail. Long ones are cut in the
+    middle rather than at the end, so both the hostname and whatever sits at
+    the end of the path survive. See the MAX_LEN comment for why both ends.
+    """
+    if len(url) <= HEAD_LEN + TAIL_LEN:
+        return url, ""
+    return url[:HEAD_LEN], url[-TAIL_LEN:]
 
 
 def encode(urls, vocab) -> torch.Tensor:
-    """Turn URLs into a (n_urls x MAX_LEN) tensor of character IDs."""
+    """Turn URLs into a (n_urls x MAX_LEN) tensor of character IDs.
+
+    Layout: [head chars] SEP [tail chars] [padding]. A URL short enough to
+    fit whole still gets a SEP after it, so the separator means the same
+    thing everywhere -- "the readable part ends here" -- rather than only
+    appearing on long URLs, which would let the model use its presence as a
+    length signal instead of a boundary marker.
+    """
     encoded = np.full((len(urls), MAX_LEN), PAD, dtype=np.int64)
+
     for row, url in enumerate(urls):
-        for column, character in enumerate(url[:MAX_LEN]):
+        head, tail = windows(url)
+
+        for column, character in enumerate(head):
             encoded[row, column] = vocab.get(character, UNK)
+
+        encoded[row, HEAD_LEN] = SEP
+
+        for offset, character in enumerate(tail):
+            encoded[row, HEAD_LEN + 1 + offset] = vocab.get(character, UNK)
+
     return torch.from_numpy(encoded)
 
 
@@ -255,7 +304,7 @@ def main() -> None:
     y_train_t = torch.tensor(y_train.values, dtype=torch.float32)
     y_val_t = torch.tensor(y_val.values, dtype=torch.float32)
 
-    model = CharCNN(vocab_size=len(vocab) + 2)
+    model = CharCNN(vocab_size=len(vocab) + RESERVED)
     parameters = sum(p.numel() for p in model.parameters())
     print(f"{parameters:,} parameters to learn from {len(urls_train):,} URLs\n")
 
@@ -295,14 +344,42 @@ def main() -> None:
     # against the test set they came from: the row-wise and domain-disjoint
     # splits produce test sets of different sizes AND different contents.
     # Anything loading this file must check before trusting it.
+    # val_probs is saved as well as test_probs so that anything combining this
+    # model with another -- ensemble.py -- can tune its blend on VALIDATION.
+    # Choosing a blend weight by looking at test scores would be the same
+    # cheat the three-way split exists to prevent, just one level up: the
+    # ensemble would be fitted to the test set even though neither model was.
     REPORTS.mkdir(exist_ok=True)
     np.savez(
         REPORTS / "cnn_test.npz",
+        val_probs=val_probs,
         test_probs=test_probs,
         threshold=threshold,
         split_mode="domain-disjoint" if GROUP_BY_DOMAIN else "row-wise",
     )
     print(f"\nwrote {REPORTS / 'cnn_test.npz'}")
+
+    # Save the trained model itself, not just its predictions.
+    #
+    # adversarial.py needs to score URLs that did not exist at training time
+    # (mutated ones), which saved probabilities cannot answer. Week 7's API
+    # needs the same thing. The vocabulary goes with it because the weights
+    # are meaningless without the exact character->ID mapping they were
+    # trained on -- a rebuilt vocab would silently permute every embedding.
+    #
+    # Gitignored (*.pt): models are regenerated, not versioned.
+    MODELS.mkdir(exist_ok=True)
+    torch.save(
+        {
+            "state_dict": model.state_dict(),
+            "vocab": vocab,
+            "threshold": threshold,
+            "max_len": MAX_LEN,
+            "split_mode": "domain-disjoint" if GROUP_BY_DOMAIN else "row-wise",
+        },
+        MODELS / "cnn.pt",
+    )
+    print(f"wrote {MODELS / 'cnn.pt'}")
 
 
 if __name__ == "__main__":

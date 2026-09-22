@@ -20,15 +20,22 @@ be measuring the wrong thing, and what the number became after it was fixed.
 
 ## Status
 
-**Week 5 of 8 complete.** Four models, a domain-disjoint split, thresholds
-chosen on validation under an explicit cost policy, test set evaluated once.
+**Week 6 of 8 complete.** Four models, a domain-disjoint split, thresholds
+chosen on validation under an explicit cost policy, test set evaluated once —
+and then attacked on purpose (see
+[Adversarial evasion](#adversarial-evasion), where the shipped model is
+evaded 97.5% of the time by an attacker who simply looks ordinary).
 
 | Model | AUC | Precision | Recall | False alarms | Missed attacks |
 |---|---|---|---|---|---|
 | Logistic regression (25 features) | 0.866 | 0.726 | 0.859 | 450 | 195 |
 | Gradient boosting (25 features) | 0.917 | 0.806 | 0.880 | 293 | 167 |
-| **Character-level CNN (raw URL)** | **0.956** | **0.847** | **0.935** | **234** | **90** |
+| **Character-level CNN (raw URL)** | **0.961** | **0.819** | **0.952** | **291** | **67** |
 | CNN + gradient boosting ensemble | 0.960 | 0.863 | 0.927 | 204 | 101 |
+
+The CNN figures are post-truncation-fix (head+tail windowing). Before it, the
+same model scored 0.956 / 0.847 / 0.935. The ensemble row predates the fix and
+is stale by that much — it is reported for the methodology, not shipped.
 
 **The shipped model is the CNN, not the ensemble** — see
 [Why the ensemble isn't shipped](#why-the-ensemble-isnt-shipped).
@@ -215,6 +222,132 @@ near-identical options, not a decisive winner.
 torch and scikit-learn at inference, two artefacts to keep in sync — for
 +0.004 AUC and slightly *worse* recall, which is the direction the cost policy
 says to favour. The CNN alone is shipped.
+
+---
+
+## Adversarial evasion
+
+Every number above assumes phishing URLs arrive as attackers happen to write
+them today. They do not have to. `src/adversarial.py` takes the **1,160
+phishing URLs both models correctly caught**, edits each one the way an
+adversary would, and measures how much recall survives. Thresholds stay as
+validation chose them — an attacker does not get to retune your detector.
+
+Two families of edit:
+
+- **Obfuscation** — hide the incriminating parts. Strip the `phish_hints`
+  vocabulary, move off a suspicious TLD, flatten the path, drop it entirely.
+  These target the feature list directly.
+- **Camouflage** — hide nothing; look ordinary. Rehost on a shared platform
+  (`pages.dev`, `weebly.com`) and use a path that reads like a blog article.
+
+| Mutation | CNN recall | GB recall |
+|---|---|---|
+| *(unmodified)* | 1.000 | 1.000 |
+| obfuscate: strip phish words | 0.995 | 0.984 |
+| obfuscate: clean TLD | 0.994 | 0.988 |
+| obfuscate: flatten path | 0.896 | 0.918 |
+| obfuscate: host only | 0.735 | 0.601 |
+| camouflage: english path | 0.338 | 0.355 |
+| camouflage: shared platform | 0.181 | 0.352 |
+| **camouflage: platform + english** | **0.025** | **0.002** |
+| truncation: pad w/ english | 0.306 | 0.956 |
+| truncation: pad w/ gibberish | 1.000 | 1.000 |
+
+Recall is the fraction of already-caught phishing still caught after the edit.
+1.000 means the attack failed; 0.000 is total evasion. Attack surface: 1,188
+phishing URLs both models caught unmodified. These are the numbers **after**
+the truncation fix described below; the pre-fix figures are in that section.
+
+### Obfuscation barely works
+
+Deleting every word in the `phish_hints` vocabulary leaves recall at 0.99 —
+the attack does essentially nothing. Moving off a suspicious TLD does nothing
+either. That is a finding about the feature set rather than about attackers:
+`num_phish_hints` and `suspicious_tld` are close to decorative, consistent
+with `num_phish_hints` having fallen to 6th in permutation importance once
+domain leakage was removed.
+
+### Camouflage is near-total, and it is the cheaper attack
+
+Platform hosting plus an English path evades **97.5%** of the time against the
+CNN and **99.8%** against gradient boosting. The prediction — made before
+running it — was that camouflage would
+beat obfuscation, because obfuscation makes a URL *weird* and weird is what
+the models were trained to notice. Camouflage makes it ordinary.
+
+An attacker needs no cleverness here. They need a free Weebly account and a
+boring page name.
+
+**This cannot be fixed with lexical features, and that is the result.**
+Consider:
+
+```
+to-our.weebly.com/of-story-tricks-how       <- phishing
+my-garden.weebly.com/how-to-grow-tomatoes   <- someone's blog
+```
+
+The separating information is not in the string. No architecture, no extra
+feature, and no amount of data recovers a signal the input does not carry.
+Catching this needs domain age (WHOIS), resolution behaviour (DNS), page
+content, or a reputation feed — all of which this project excludes by design.
+So the honest conclusion is a boundary: **URL-only detection stops working at
+camouflage**, and week 6 measured where that boundary sits.
+
+**Caveat, stated plainly:** the two platform mutations replace host *and*
+path, so the result is a fresh URL on shared hosting rather than the original
+one edited. The narrower, still-damning claim is that phishing hosted on a
+shared platform with an ordinary path carries essentially no lexical signal.
+The flatten-path and truncation rows do not have this problem — they preserve
+the original URL — which makes truncation the cleanest single result here.
+
+### The truncation attack: found, fixed, verified
+
+The sharpest number in week 6 was self-inflicted. Padding the front of a URL
+with ~210 characters of innocuous path dropped **CNN recall from 1.000 to
+0.062** while gradient boosting stayed at **0.959**. A 94% evasion caused by
+an implementation choice — the CNN's fixed 200-character window — and nothing
+to do with phishing. Gradient boosting was unaffected because its features are
+computed over the whole string.
+
+Finding 11 predicted this and could not test it: no URL in the dataset has a
+benign prefix hiding a payload, because no attacker was targeting this model.
+The attack had to be constructed.
+
+**The fix.** `cnn.py` now reads the first 150 characters *and* the last 150,
+joined by a separator token, instead of one 200-character window anchored at
+the start. Raising the limit to 512 would not have worked — the attacker pads
+520 instead. Any single window anchored at one end is defeated by padding the
+other. It cost nothing in accuracy: ROC AUC went **0.956 → 0.961**.
+
+**Verifying it was harder than it looks, and this is the methodological part.**
+The obvious check — rerun the padding attack — gave 0.306. Better than 0.062,
+but far from fixed. The reason is that the padding was built from ordinary
+English words, which makes the URL read like a blog: the test was measuring
+truncation *and* camouflage at once, and camouflage is the strongest attack in
+the table.
+
+There is no neutral filler. Any text either resembles benign content (helping
+the attacker) or attacker content (helping the model). So the attack was run
+with both, bracketing the answer:
+
+| Padding | CNN recall | bias |
+|---|---|---|
+| English words | 0.306 | pessimistic — filler is also camouflage |
+| Random gibberish | **1.000** | optimistic — filler is also a suspicion signal |
+
+**Gibberish padding is caught 100% of the time. The window hole is closed.**
+
+And the pessimistic bound is explained without appealing to truncation at all:
+0.306 for English-padded URLs versus **0.338** for English paths with *no
+padding whatsoever*. Statistically the same. The padding contributes nothing
+beyond looking ordinary — so what survives is camouflage arriving through a
+different door, not a window that is still leaking.
+
+**What the fix does not cover:** an attacker who pads *both* ends pushes the
+payload into the middle, out of both windows. More conspicuous and more
+expensive, but possible. The fix raises the price; it does not close every
+hole. A length-invariant model would be the real answer and is out of scope.
 
 ---
 
@@ -437,11 +570,12 @@ sample implies the "hard core" is partly dataset error rather than model
 failure — which puts a ceiling on achievable accuracy that no model can cross.
 Quantifying that rate is outstanding.
 
-**11. A predicted weakness that did not show up.** `cnn.py` truncates URLs at
-`MAX_LEN = 200` characters, so an attacker who knows the cut-off could pad the
-front of a URL and push the incriminating part out of view. The prediction was
-that the CNN would therefore be disproportionately wrong on long URLs. It is
-not — the opposite:
+**11. A predicted weakness that the natural data could not detect — and a
+constructed attack that confirmed it.** `cnn.py` originally truncated URLs at
+200 characters, so an attacker who knew the cut-off could pad the front and
+push the payload out of view. The first check looked for this in the existing
+data by comparing error rates on long versus short URLs. It found the
+opposite:
 
 | model | error rate (≤200 chars) | error rate (>200) |
 |---|---|---|
@@ -453,11 +587,18 @@ Long URLs are *easier* for every model. All 59 in the test set are phishing
 with obviously stuffed paths, so the evidence sits well inside the first 200
 characters.
 
-The prediction is untested rather than disproved: the attack requires a
-benign-looking prefix with the payload past the cut-off, and no such URL
-exists in this data because no attacker is currently targeting this model.
-Week 6 has to construct it rather than look for it. Recording the failed
-prediction alongside the successful ones is deliberate.
+The conclusion at the time was "untested rather than disproved": the attack
+needs a benign-looking prefix hiding a payload, and no such URL exists in the
+data because no attacker was targeting this model. Absence of the attack is
+not evidence the attack fails.
+
+Week 6 constructed it, and the vulnerability was real — **94% evasion**. See
+[the truncation section](#the-truncation-attack-found-fixed-verified) for the
+attack, the fix, and the two-sided verification.
+
+The lesson worth keeping: *a weakness you cannot find in your data may simply
+be one nobody has exercised yet.* Looking for evidence of an attack in a
+dataset collected before the attack existed will always come up empty.
 
 ---
 
@@ -467,17 +608,20 @@ prediction alongside the successful ones is deliberate.
 - [x] **Week 2** — fix collection leakage, expand to 25 features
 - [x] **Week 3** — three-way split, gradient boosting, cost-aware threshold policy, PR curves
 - [x] **Week 4** — character-level CNN in PyTorch, domain-disjoint split
-- [x] **Week 5** — error analysis, model disagreement, ensemble
-- [ ] **Week 6** — adversarial evasion testing
+- [x] **Week 5** — error analysis, model disagreement, ensemble, learning curves
+- [x] **Week 6** — adversarial evasion testing
 - [ ] **Week 7** — FastAPI endpoint, CLI, packaging
 - [ ] **Week 8** — write-up
 
-Week 6 is the intended headline, and error analysis changed what it should
-test. The original plan was obfuscation — shorten the URL, strip phishing
-vocabulary, flatten the path. But findings 9 and 10 point at a cheaper attack:
-the models cannot distinguish benign shared hosting from phishing on the same
-platform, and they clear anything that reads like plain English. So the
-evasion to measure is **looking legitimate**, not hiding.
+Error analysis changed what week 6 tested. The original plan was obfuscation —
+shorten the URL, strip phishing vocabulary, flatten the path. Findings 9 and
+10 pointed at a cheaper attack instead: the models cannot distinguish benign
+shared hosting from phishing on the same platform, and they clear anything
+reading like plain English. Measuring **looking legitimate** rather than
+hiding is what produced the 97.5% evasion result.
+
+Outstanding: quantify the label-noise rate (finding 10), add the CNN's
+learning curve, and run recall against the live OpenPhish pool.
 
 ---
 
@@ -492,6 +636,9 @@ evasion to measure is **looking legitimate**, not hiding.
 | `src/cnn.py` | **Best model.** Character-level CNN in PyTorch. Same split and threshold policy, imported from `evaluate.py`. |
 | `src/ensemble.py` | Blends the CNN with gradient boosting. Nine strategies scored on validation, one chosen, test touched once. |
 | `src/error_analysis.py` | Reads the URLs each model gets wrong. Writes a defanged dump to gitignored `data/`. |
+| `src/adversarial.py` | **Week 6.** Edits caught phishing the way an attacker would; measures recall collapse. |
+| `src/learning_curve.py` | AUC against training size, subsampled by domain. |
+| `colab/week6_adversarial.ipynb` | Runs `cnn.py` and `adversarial.py` on Colab, since Windows Application Control blocks torch locally. |
 | `src/plot_curves.py` | Precision-recall and ROC curves → `reports/`. |
 | `src/train.py` | Week 1–2 baseline. Superseded, kept as the reference point the story is told against. |
 | `src/get_data.py` | Week 1 OpenPhish+Tranco builder. Superseded — this is the code that produced the artifact. |

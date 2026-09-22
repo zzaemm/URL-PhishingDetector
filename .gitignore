@@ -17,6 +17,10 @@ logs/
 *.pt
 models/
 
+# Colab upload bundles. These repackage data/ (which is gitignored) into a
+# zip at the repo root, where the data/ rule no longer covers it.
+*-colab.zip
+
 # Editor / OS noise
 .vscode/
 .idea/

@@ -1,5 +1,16 @@
 pandas
 scikit-learn
+scipy
 requests
-pyarrow
 matplotlib
+torch
+
+# pyarrow is needed ONLY by reference_data.py, to read the HuggingFace
+# parquet download. Once data/raw/reference.csv exists, nothing else uses it.
+#
+# Left uninstalled deliberately: pandas imports pyarrow at startup whenever it
+# is present, and on this machine Windows Application Control blocks
+# pyarrow's _compute DLL -- which breaks `import pandas`, and therefore every
+# script in the project. Install it only to re-download the dataset.
+#
+# pyarrow
