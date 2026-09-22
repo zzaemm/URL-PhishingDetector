@@ -26,3 +26,6 @@ models/
 .idea/
 .DS_Store
 Thumbs.db
+
+# Internal working notes -- not for publication
+HANDOFF.md
