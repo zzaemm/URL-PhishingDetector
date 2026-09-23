@@ -12,10 +12,20 @@ venv/
 # Scheduled-job output
 logs/
 
-# Trained model files (regenerate them, don't version them)
+# Trained model files. Regenerate them, don't version them -- EXCEPT the
+# NumPy export, which is the thing the CLI actually loads. At 240 KB it is
+# small enough to ship, and without it a fresh clone cannot run the headline
+# command without first installing torch and retraining, which contradicts
+# the README's whole "no PyTorch required" claim.
+#
+# Note the form: `models/` would exclude the directory outright and git will
+# not descend into an excluded directory, so a later negation could never
+# re-include a file inside it. `models/*` excludes the contents instead,
+# which leaves the negation able to work.
 *.pkl
 *.pt
-models/
+models/*
+!models/cnn_numpy.npz
 
 # Colab upload bundles. These repackage data/ (which is gitignored) into a
 # zip at the repo root, where the data/ rule no longer covers it.

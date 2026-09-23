@@ -59,7 +59,8 @@ Every point on a curve is one possible decision threshold. The CNN sits above
 both feature models at *every* threshold — a stronger claim than comparing
 them at one operating point. Circles mark the reported operating points; the
 dotted line is what flagging every URL would score on this test set, the floor
-any real model must beat.
+any real model must beat. ([ROC curve](reports/roc_curve.png) too, though PR
+is the honest one here — see the imbalance caveat below.)
 
 **Caveat stated up front:** the test set is roughly balanced. Real traffic is not
 — benign URLs outnumber phishing by orders of magnitude. Under that imbalance
@@ -238,6 +239,51 @@ validation and test was touched once.
 *The engineering cost is real.* Shipping the ensemble means two models, torch
 *and* scikit-learn at inference, two artefacts to keep in sync — for +0.003
 AUC and 61 more phishing URLs through the net. The CNN alone is shipped.
+
+---
+
+## Does more data help?
+
+The CNN beats the feature models at this data scale. Whether that gap is a
+property of the *models* or of having only 11,429 URLs is a different
+question, and it has a practical answer attached: collecting more data is
+weeks of work, so it is worth knowing whether it would pay.
+
+`src/learning_curve.py` retrains on 10/25/50/75/100% of the training set and
+scores each on validation. Subsampling is **by domain, not by row** — see
+[the note above](#the-same-principle-applies-to-subsampling) for why the row-wise
+version would have given the opposite answer.
+
+![Learning curves](reports/learning_curve.png)
+
+| Domains | URLs | Logistic regression | Gradient boosting |
+|---|---|---|---|
+| 363 | 968 | 0.872 ±0.011 | 0.892 ±0.010 |
+| 908 | 1,894 | 0.872 ±0.003 | 0.910 ±0.006 |
+| 1,817 | 3,588 | 0.877 ±0.006 | 0.928 ±0.005 |
+| 2,725 | 5,119 | 0.879 ±0.006 | 0.933 ±0.002 |
+| 3,634 | 6,962 | 0.880 | 0.935 |
+
+**Both feature models are saturated.** Gradient boosting gains +0.018, +0.018,
++0.005, then **+0.002** — the final 33% more data bought less than its own
+noise band. Logistic regression is flat from the very first point: seven times
+the data bought 0.008 AUC.
+
+Two things worth pulling out:
+
+**14% of the data gets 95% of the performance.** Gradient boosting scores
+0.892 on 363 domains against 0.935 on 3,634. Whatever those 25 features can
+express, they express almost immediately.
+
+**Model choice beats data volume outright.** Gradient boosting on 968 URLs
+(0.892) beats logistic regression on all 6,962 (0.880). A better model on
+one-seventh of the data wins.
+
+So for the feature models the bottleneck is **information, not examples** —
+they are capped by what 25 numbers can encode, and more URLs cannot lift that
+ceiling. The CNN has no such cap, since it reads the whole string; whether its
+curve is still climbing at 100% is the obvious companion experiment and is
+outstanding (training needs torch, so Colab).
 
 ---
 
@@ -787,9 +833,13 @@ shared hosting from phishing on the same platform, and they clear anything
 reading like plain English. Measuring **looking legitimate** rather than
 hiding is what produced the 97.5% evasion result.
 
-Outstanding: the CNN's learning curve (training still needs torch, so Colab),
-a live *benign* sample so the models can be compared properly on live data,
-and the label-noise rate from finding 10.
+Outstanding: the CNN's learning curve (training needs torch, so Colab), a live
+*benign* sample so the models can be compared properly on live data, and the
+label-noise rate from finding 10.
+
+`models/cnn_numpy.npz` is committed deliberately — it is what the CLI loads,
+and without it a fresh clone could not run the headline command without
+installing torch and retraining first.
 
 ---
 
