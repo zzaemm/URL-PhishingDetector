@@ -822,15 +822,38 @@ and the label-noise rate from finding 10.
 python -m venv .venv
 .venv\Scripts\activate          # Windows
 pip install -r requirements.txt
-
-python src/reference_data.py    # download the training dataset
-python src/features.py          # extract features
-python src/evaluate.py          # train and evaluate
-python src/plot_curves.py       # write PR and ROC curves to reports/
 ```
 
-`python src/accumulate.py` refreshes the live phishing pool; it is not needed to
-reproduce the results above.
+That is enough to **score URLs** and to reproduce every evaluation except
+training the CNN:
+
+```bash
+python src/cnn_numpy.py "http://suspicious.example/login"   # the classifier
+python src/cnn_numpy.py --verify                            # check the model
+
+python src/reference_data.py    # download the training dataset
+python src/features.py          # extract the 25 features
+python src/evaluate.py          # feature models, cost policy, importances
+python src/plot_curves.py       # PR and ROC curves -> reports/
+python src/live_recall.py       # recall against the live OpenPhish pool
+python src/adversarial.py       # week 6 evasion testing
+```
+
+**No PyTorch required.** `requirements.txt` deliberately omits it — inference
+goes through `src/cnn_numpy.py`. Training the CNN is the one thing that needs
+it:
+
+```bash
+pip install -r requirements-train.txt
+
+python src/cnn.py                  # train -> models/cnn.pt
+python src/export_numpy_model.py   # -> models/cnn_numpy.npz
+python src/cnn_numpy.py --verify   # confirm the export matches PyTorch
+```
+
+`python src/accumulate.py` refreshes the live phishing pool; it is not needed
+to reproduce the results above. If torch will not install locally,
+`colab/week6_adversarial.ipynb` runs the same scripts unmodified.
 
 ---
 

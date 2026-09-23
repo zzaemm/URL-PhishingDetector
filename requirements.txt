@@ -1,16 +1,25 @@
+# Everything except training the CNN.
+#
+# This covers the CLI, the feature models, every evaluation script and the
+# plots. Notably it does NOT include torch: inference runs through
+# src/cnn_numpy.py, which reimplements the trained network's forward pass in
+# NumPy and is verified against PyTorch's own outputs (see the README).
+#
+# To retrain the CNN, use requirements-train.txt instead.
+
+numpy
 pandas
 scikit-learn
 scipy
 requests
 matplotlib
-torch
 
 # pyarrow is needed ONLY by reference_data.py, to read the HuggingFace
 # parquet download. Once data/raw/reference.csv exists, nothing else uses it.
 #
-# Left uninstalled deliberately: pandas imports pyarrow at startup whenever it
-# is present, and on this machine Windows Application Control blocks
-# pyarrow's _compute DLL -- which breaks `import pandas`, and therefore every
-# script in the project. Install it only to re-download the dataset.
+# Left out deliberately: pandas imports pyarrow at startup whenever it is
+# present, and on some Windows machines Application Control blocks pyarrow's
+# _compute DLL -- which breaks `import pandas`, and therefore every script in
+# the project. Install it only to re-download the dataset.
 #
 # pyarrow

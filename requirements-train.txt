@@ -1,0 +1,19 @@
+# Training the character-level CNN. Only src/cnn.py and src/adversarial.py
+# need this; everything else runs on requirements.txt alone.
+#
+#     pip install -r requirements-train.txt
+#
+# Then:
+#     python src/cnn.py                  # train, saves models/cnn.pt
+#     python src/export_numpy_model.py   # -> models/cnn_numpy.npz (no torch)
+#     python src/cnn_numpy.py --verify   # confirm the export matches
+#
+# After that the CNN runs anywhere NumPy does, and torch is no longer needed.
+#
+# If torch cannot be installed locally (Windows Application Control blocks its
+# DLLs on some machines), colab/week6_adversarial.ipynb runs the same scripts
+# unmodified and hands back the two model files.
+
+-r requirements.txt
+
+torch
